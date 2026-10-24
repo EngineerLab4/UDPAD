@@ -28,6 +28,11 @@ export const RegisterPage = () => {
   } = useForm({
     defaultValues: {
       fullName: '',
+      fatherName: '',
+      motherName: '',
+      caste: '',
+      casteOther: '',
+      fullAddress: '',
       mobile: '',
       email: '',
       password: '',
@@ -37,6 +42,7 @@ export const RegisterPage = () => {
   });
 
   const passwordVal = watch('password');
+  const selectedCaste = watch('caste');
 
   const onSubmit = async (data) => {
     setAuthError('');
@@ -45,13 +51,18 @@ export const RegisterPage = () => {
     try {
       const result = await registerAuth({
         fullName: data.fullName,
+        fatherName: data.fatherName,
+        motherName: data.motherName,
+        caste: data.caste,
+        casteOther: data.casteOther,
+        fullAddress: data.fullAddress,
         mobile: data.mobile,
         email: data.email,
         password: data.password
       });
 
       if (result.success) {
-        setSuccessMessage('Registration successful! Local demo citizen session established.');
+        setSuccessMessage('Registration successful! Profile registered in Supabase.');
         setTimeout(() => {
           navigate('/dashboard');
         }, 1200);
@@ -59,7 +70,7 @@ export const RegisterPage = () => {
         setAuthError(result.error || 'Registration failed.');
       }
     } catch (err) {
-      setAuthError('An unexpected error occurred during demo registration.');
+      setAuthError('An unexpected error occurred during citizen registration.');
     } finally {
       setIsLoading(false);
     }
@@ -98,7 +109,7 @@ export const RegisterPage = () => {
               Create a Citizen Account
             </h1>
             <p className="text-xs text-gov-muted mt-1 leading-relaxed">
-              Register to access your household records, explore welfare benefits and track applications.
+              Register demographic and family details to access household records, deduplication verification and welfare benefits.
             </p>
           </div>
 
@@ -120,12 +131,12 @@ export const RegisterPage = () => {
             {/* Full Name */}
             <div>
               <label className="block text-xs font-bold text-gov-text uppercase tracking-wider mb-1.5">
-                Full Name <span className="text-red-600">*</span>
+                Full Legal Name <span className="text-red-600">*</span>
               </label>
               <input
                 type="text"
                 {...register('fullName', {
-                  required: 'Please enter your full name',
+                  required: 'Please enter your full legal name',
                   minLength: { value: 3, message: 'Name must be at least 3 characters' }
                 })}
                 placeholder="e.g. Ramesh Chandra Verma"
@@ -136,6 +147,86 @@ export const RegisterPage = () => {
               {errors.fullName && (
                 <p className="mt-1 text-xs text-red-600 font-medium">{errors.fullName.message}</p>
               )}
+            </div>
+
+            {/* Father's Name & Mother's Name */}
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+              <div>
+                <label className="block text-xs font-bold text-gov-text uppercase tracking-wider mb-1.5">
+                  Father's Name <span className="text-gov-muted font-normal">(Family Verification)</span>
+                </label>
+                <input
+                  type="text"
+                  {...register('fatherName')}
+                  placeholder="e.g. Shri Mohan Lal"
+                  className="w-full px-3.5 py-2.5 rounded-lg border border-gov-border text-sm text-gov-text bg-white placeholder:text-slate-400 focus:outline-none focus:ring-2 focus:ring-gov-blue"
+                />
+              </div>
+
+              <div>
+                <label className="block text-xs font-bold text-gov-text uppercase tracking-wider mb-1.5">
+                  Mother's Name <span className="text-gov-muted font-normal">(Family Verification)</span>
+                </label>
+                <input
+                  type="text"
+                  {...register('motherName')}
+                  placeholder="e.g. Smt. Shanti Devi"
+                  className="w-full px-3.5 py-2.5 rounded-lg border border-gov-border text-sm text-gov-text bg-white placeholder:text-slate-400 focus:outline-none focus:ring-2 focus:ring-gov-blue"
+                />
+              </div>
+            </div>
+
+            {/* Caste / Social Category */}
+            <div>
+              <label className="block text-xs font-bold text-gov-text uppercase tracking-wider mb-1.5">
+                Caste / Social Category
+              </label>
+              <select
+                {...register('caste')}
+                className="w-full px-3.5 py-2.5 rounded-lg border border-gov-border text-sm text-gov-text bg-white focus:outline-none focus:ring-2 focus:ring-gov-blue"
+              >
+                <option value="">-- Select Caste Category (Do not assume) --</option>
+                <option value="General">General / Unreserved (UR)</option>
+                <option value="OBC">OBC (Other Backward Classes)</option>
+                <option value="SC">SC (Scheduled Castes)</option>
+                <option value="ST">ST (Scheduled Tribes)</option>
+                <option value="EWS">EWS (Economically Weaker Section)</option>
+                <option value="Other">Other (Please specify below)</option>
+              </select>
+
+              {selectedCaste === 'Other' && (
+                <div className="mt-3">
+                  <label className="block text-xs font-bold text-gov-text uppercase tracking-wider mb-1.5">
+                    Specify Caste / Community Name <span className="text-red-600">*</span>
+                  </label>
+                  <input
+                    type="text"
+                    {...register('casteOther', {
+                      required: selectedCaste === 'Other' ? 'Please specify your caste name' : false
+                    })}
+                    placeholder="Enter caste or community name"
+                    className={`w-full px-3.5 py-2.5 rounded-lg border text-sm text-gov-text bg-white placeholder:text-slate-400 focus:outline-none focus:ring-2 focus:ring-gov-blue ${
+                      errors.casteOther ? 'border-red-500 bg-red-50/20' : 'border-gov-border'
+                    }`}
+                  />
+                  {errors.casteOther && (
+                    <p className="mt-1 text-xs text-red-600 font-medium">{errors.casteOther.message}</p>
+                  )}
+                </div>
+              )}
+            </div>
+
+            {/* Full Residential Address */}
+            <div>
+              <label className="block text-xs font-bold text-gov-text uppercase tracking-wider mb-1.5">
+                Full Residential Address
+              </label>
+              <textarea
+                rows={2}
+                {...register('fullAddress')}
+                placeholder="e.g. House No. 42, Ward 3, Village Rampur, Tehsil Shamli, District Shamli, Uttar Pradesh - 247776"
+                className="w-full px-3.5 py-2.5 rounded-lg border border-gov-border text-sm text-gov-text bg-white placeholder:text-slate-400 focus:outline-none focus:ring-2 focus:ring-gov-blue"
+              />
             </div>
 
             {/* Mobile Number */}

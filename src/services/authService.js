@@ -131,7 +131,6 @@ export const authService = {
 
   // Register new citizen account
   async register(userData) {
-    // 1. Try Express Backend API
     try {
       const res = await api.post('/auth/register', userData);
       if (res.ok && res.data?.user) {
@@ -142,62 +141,40 @@ export const authService = {
         localStorage.setItem(AUTH_STORAGE_KEY, JSON.stringify(sessionUser));
         return { success: true, user: sessionUser };
       }
-      if (!res.ok && !res.networkError && !res.isGatewayError) {
-        return { success: false, error: res.error || 'Registration failed.' };
-      }
-      if (res.isGatewayError) {
-        console.warn('Backend proxy 502/503/504 encountered during registration, falling back to local storage.');
-      }
-    } catch (err) {
-      console.warn('API register failed, falling back to local storage:', err);
-    }
-
-    // 2. Local Storage Fallback
-    await new Promise((resolve) => setTimeout(resolve, 250));
-
-    let users = [];
-    try {
-      const stored = localStorage.getItem(USERS_STORAGE_KEY);
-      if (stored) users = JSON.parse(stored);
-    } catch (e) {
-      console.error(e);
-    }
-
-    // Check duplicate mobile
-    if (users.some((u) => u.mobile === userData.mobile.trim())) {
       return {
         success: false,
-        error: 'An account with this mobile number already exists. Please sign in instead.'
+        error: res.error || 'Registration failed on UDPAD backend.'
+      };
+    } catch (err) {
+      return {
+        success: false,
+        error: err.message || 'Network error encountered during registration.'
       };
     }
+  },
 
-    const newUser = createInitialUser({
-      fullName: userData.fullName.trim(),
-      mobile: userData.mobile.trim(),
-      email: userData.email ? userData.email.trim() : '',
-      gender: userData.gender || 'Not Specified',
-      occupation: userData.occupation || 'Citizen'
-    });
-    newUser.password = userData.password;
-
-    users.push(newUser);
-    localStorage.setItem(USERS_STORAGE_KEY, JSON.stringify(users));
-
-    // Save session
-    const sessionUser = {
-      id: newUser.id,
-      citizenId: newUser.citizenId,
-      fullName: newUser.fullName,
-      mobile: newUser.mobile,
-      email: newUser.email,
-      gender: newUser.gender,
-      occupation: newUser.occupation,
-      householdId: newUser.householdId,
-      address: newUser.address
-    };
-    localStorage.setItem(AUTH_STORAGE_KEY, JSON.stringify(sessionUser));
-
-    return { success: true, user: sessionUser };
+  // Update citizen profile and family details
+  async updateProfile(profileData) {
+    try {
+      const res = await api.put('/auth/profile', profileData);
+      if (res.ok && res.data?.user) {
+        const sessionUser = {
+          ...res.data.user,
+          token: res.data.token || res.data.user.token
+        };
+        localStorage.setItem(AUTH_STORAGE_KEY, JSON.stringify(sessionUser));
+        return { success: true, user: sessionUser };
+      }
+      return {
+        success: false,
+        error: res.error || 'Failed to update profile on server.'
+      };
+    } catch (err) {
+      return {
+        success: false,
+        error: err.message || 'Network error encountered during profile update.'
+      };
+    }
   },
 
   // Account recovery

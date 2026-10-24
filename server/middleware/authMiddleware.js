@@ -103,3 +103,20 @@ export const optionalAuth = async (req, res, next) => {
     next();
   }
 };
+
+/**
+ * Require government officer role.
+ * Strictly blocks citizen sessions from accessing officer endpoints.
+ */
+export const requireOfficer = async (req, res, next) => {
+  return requireAuth(req, res, () => {
+    const isOfficer = req.isOfficer || req.citizen?.role === 'OFFICER' || (req.citizen?.email && req.citizen.email.toLowerCase().endsWith('@gov.in'));
+    if (!isOfficer) {
+      return res.status(403).json({
+        success: false,
+        error: 'Access forbidden: Only authorized government officials can access this resource.'
+      });
+    }
+    next();
+  });
+};

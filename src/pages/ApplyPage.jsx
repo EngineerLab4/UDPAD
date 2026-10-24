@@ -19,6 +19,7 @@ import {
 } from 'lucide-react';
 import { useAuth } from '../context/AuthContext';
 import { mockDataService } from '../services/mockDataService';
+import { api } from '../services/apiClient';
 import { CitizenHeader } from '../components/layout/CitizenHeader';
 import { TopGovBar } from '../components/layout/TopGovBar';
 import { Footer } from '../components/layout/Footer';
@@ -65,6 +66,7 @@ export const ApplyPage = () => {
 
   const [submittedApp, setSubmittedApp] = useState(null);
   const [submitting, setSubmitting] = useState(false);
+  const [submitError, setSubmitError] = useState('');
 
   useEffect(() => {
     if (user) {
@@ -98,10 +100,12 @@ export const ApplyPage = () => {
   };
 
   // Final Submission
-  const handleFinalSubmit = () => {
+  const handleFinalSubmit = async () => {
     setSubmitting(true);
-    setTimeout(() => {
-      const newApp = mockDataService.createApplication({
+    setSubmitError('');
+
+    try {
+      const payload = {
         schemeId: selectedScheme.id,
         schemeName: selectedScheme.name,
         department: selectedScheme.department,
@@ -111,12 +115,23 @@ export const ApplyPage = () => {
         householdRef: contextData.householdRef,
         dwellingRef: contextData.dwellingRef,
         documents: uploadedDocs
-      });
+      };
 
+      const res = await api.post('/applications', payload);
+      if (!res.ok) {
+        setSubmitError(res.error || 'Failed to submit application. Please review and try again.');
+        setSubmitting(false);
+        return;
+      }
+
+      const newApp = res.data?.application || mockDataService.createApplication(payload);
       setSubmittedApp(newApp);
       setSubmitting(false);
       setCurrentStep(5);
-    }, 800);
+    } catch (err) {
+      setSubmitError(err.message || 'An error occurred while submitting application.');
+      setSubmitting(false);
+    }
   };
 
   const steps = [
@@ -547,6 +562,13 @@ export const ApplyPage = () => {
                 </div>
               </div>
             </div>
+
+            {submitError && (
+              <div className="p-3.5 bg-red-50 border border-red-200 rounded-lg flex items-start gap-2.5 text-xs text-red-700">
+                <AlertCircle className="w-4 h-4 text-red-600 shrink-0 mt-0.5" />
+                <span>{submitError}</span>
+              </div>
+            )}
 
             <div className="pt-4 border-t border-gov-border flex items-center justify-between">
               <button

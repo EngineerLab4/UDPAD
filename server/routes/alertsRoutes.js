@@ -66,6 +66,56 @@ router.patch('/:id/status', requireAuth, async (req, res) => {
   }
 });
 
+// POST /api/alerts/:id/resolve-match - Official duplicate review action with audit trail
+router.post('/:id/resolve-match', requireAuth, async (req, res) => {
+  try {
+    const isOfficer = req.isOfficer || req.citizen?.role === 'OFFICER' || (req.citizen?.email && req.citizen.email.toLowerCase().endsWith('@gov.in'));
+    if (!isOfficer) {
+      return res.status(403).json({
+        success: false,
+        error: 'Access forbidden: Only authorized government officials can adjudicate duplicate alerts.'
+      });
+    }
+
+    const { action, decisionReason } = req.body;
+    const allowedActions = [
+      'REVIEW_MATCH',
+      'CONFIRM_SAME_HOUSEHOLD',
+      'MARK_DIFFERENT_HOUSEHOLD',
+      'REQUEST_ADDITIONAL_VERIFICATION'
+    ];
+
+    if (!action || !allowedActions.includes(action)) {
+      return res.status(400).json({
+        success: false,
+        error: `Invalid action. Allowed actions are: ${allowedActions.join(', ')}`
+      });
+    }
+
+    if (!decisionReason || decisionReason.trim().length < 3) {
+      return res.status(400).json({
+        success: false,
+        error: 'A valid decision reason / case note is mandatory for the audit trail.'
+      });
+    }
+
+    const officer = req.officer || req.citizen;
+    const result = await db.resolveDuplicateAlert(req.params.id, officer, action, decisionReason.trim());
+
+    res.json({
+      success: true,
+      message: `Duplicate alert resolved: ${result.status}`,
+      result
+    });
+  } catch (err) {
+    console.error('Resolve duplicate alert error:', err);
+    res.status(500).json({
+      success: false,
+      error: err.message || 'Failed to resolve duplicate alert.'
+    });
+  }
+});
+
 // POST /api/alerts - Create verification alert for authenticated citizen
 router.post('/', requireAuth, async (req, res) => {
   try {

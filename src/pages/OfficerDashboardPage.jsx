@@ -22,7 +22,8 @@ import {
   Eye,
   BadgeCheck,
   MapPin,
-  ChevronRight
+  ChevronRight,
+  AlertTriangle
 } from 'lucide-react';
 import { useAuth } from '../context/AuthContext';
 import { TopGovBar } from '../components/layout/TopGovBar';
@@ -40,6 +41,12 @@ export const OfficerDashboardPage = () => {
   const [loading, setLoading] = useState(true);
   const [selectedApp, setSelectedApp] = useState(null);
   const [actionSuccessMessage, setActionSuccessMessage] = useState('');
+  const [actionErrorMessage, setActionErrorMessage] = useState('');
+
+  // Duplicate household popup alert state
+  const [activePopupAlert, setActivePopupAlert] = useState(null);
+  const [alertDecisionReason, setAlertDecisionReason] = useState('');
+  const [isSubmittingAlertAction, setIsSubmittingAlertAction] = useState(false);
 
   // Census search state
   const [censusSearch, setCensusSearch] = useState('');
@@ -50,6 +57,18 @@ export const OfficerDashboardPage = () => {
   // Form modal state for adjudication
   const [adjudicationNote, setAdjudicationNote] = useState('');
   const [isSubmittingAction, setIsSubmittingAction] = useState(false);
+
+  const isDuplicateAlert = (a) =>
+    a &&
+    (a.alertType === 'DUPLICATE_SUSPICION' ||
+      a.alertType === 'DUPLICATE_HOUSEHOLD' ||
+      a.details?.isDuplicateAlert ||
+      a.title?.includes('Duplicate') ||
+      a.title?.includes('Household') ||
+      a.details?.warning);
+
+  const isAlertUnresolved = (a) =>
+    a && (!a.details?.status || (!a.details.status.startsWith('Resolved') && a.details.status !== 'Approved'));
 
   // Fetch real backend data
   const fetchData = async () => {
@@ -68,7 +87,22 @@ export const OfficerDashboardPage = () => {
         }
       }
       if (alertsRes.ok && alertsRes.data?.alerts) {
-        setAlerts(alertsRes.data.alerts);
+        const fetchedAlerts = alertsRes.data.alerts;
+        setAlerts(fetchedAlerts);
+
+        // Auto-popup first unresolved duplicate alert if not already dismissed in this session
+        try {
+          const dismissedRaw = sessionStorage.getItem('udpad_dismissed_alerts');
+          const dismissedIds = dismissedRaw ? JSON.parse(dismissedRaw) : [];
+          const unresolved = fetchedAlerts.find(
+            (a) => isDuplicateAlert(a) && isAlertUnresolved(a) && !dismissedIds.includes(a.id)
+          );
+          if (unresolved && !activePopupAlert) {
+            setActivePopupAlert(unresolved);
+          }
+        } catch (e) {
+          console.error('Session storage check error:', e);
+        }
       }
       if (corrsRes.ok && corrsRes.data?.corrections) {
         setCorrections(corrsRes.data.corrections);
@@ -83,7 +117,82 @@ export const OfficerDashboardPage = () => {
   useEffect(() => {
     fetchData();
     searchCensus('Shamli');
+
+    // Real-time polling for new verification alerts every 12 seconds
+    const interval = setInterval(async () => {
+      try {
+        const alertsRes = await api.get('/alerts');
+        if (alertsRes.ok && alertsRes.data?.alerts) {
+          const fetchedAlerts = alertsRes.data.alerts;
+          setAlerts(fetchedAlerts);
+
+          const dismissedRaw = sessionStorage.getItem('udpad_dismissed_alerts');
+          const dismissedIds = dismissedRaw ? JSON.parse(dismissedRaw) : [];
+          const newUnresolved = fetchedAlerts.find(
+            (a) => isDuplicateAlert(a) && isAlertUnresolved(a) && !dismissedIds.includes(a.id)
+          );
+          if (newUnresolved && !activePopupAlert) {
+            setActivePopupAlert(newUnresolved);
+          }
+        }
+      } catch (e) {
+        // silent background poll
+      }
+    }, 12000);
+
+    return () => clearInterval(interval);
   }, []);
+
+  const handleDismissPopup = (alertId) => {
+    try {
+      const dismissedRaw = sessionStorage.getItem('udpad_dismissed_alerts');
+      const dismissedIds = dismissedRaw ? JSON.parse(dismissedRaw) : [];
+      if (alertId && !dismissedIds.includes(alertId)) {
+        dismissedIds.push(alertId);
+        sessionStorage.setItem('udpad_dismissed_alerts', JSON.stringify(dismissedIds));
+      }
+    } catch (e) {
+      console.error('Dismiss alert error:', e);
+    }
+    setActivePopupAlert(null);
+    setAlertDecisionReason('');
+  };
+
+  const handleResolveDuplicateAlert = async (alertId, action) => {
+    setIsSubmittingAlertAction(true);
+    setActionErrorMessage('');
+    try {
+      const defaultReasons = {
+        REVIEW_MATCH: 'Officer initiated comprehensive demographic review of household records.',
+        CONFIRM_SAME_HOUSEHOLD: 'Officer confirmed applicant belongs to existing registered household based on verified family records.',
+        MARK_DIFFERENT_HOUSEHOLD: 'Officer verified applicant resides in a distinct, independent household unit despite common parentage.',
+        REQUEST_ADDITIONAL_VERIFICATION: 'Officer requested additional proof of separate residence, utility meter connection, or family partition.'
+      };
+
+      const reason = alertDecisionReason.trim() || defaultReasons[action] || 'Officer adjudicated duplicate alert.';
+
+      const res = await api.post(`/alerts/${alertId}/resolve-match`, {
+        action,
+        decisionReason: reason
+      });
+
+      if (res.ok) {
+        setActionSuccessMessage(`Duplicate alert adjudicated: ${res.data?.message || 'Updated successfully'}`);
+        setTimeout(() => setActionSuccessMessage(''), 5000);
+        setAlertDecisionReason('');
+        setActivePopupAlert(null);
+        await fetchData();
+      } else {
+        setActionErrorMessage(res.error || 'Failed to resolve duplicate alert.');
+        setTimeout(() => setActionErrorMessage(''), 8000);
+      }
+    } catch (err) {
+      console.error('Resolve duplicate alert failed:', err);
+      setActionErrorMessage(err.message || 'Error resolving duplicate alert.');
+    } finally {
+      setIsSubmittingAlertAction(false);
+    }
+  };
 
   const searchCensus = async (term = '') => {
     setCensusLoading(true);
@@ -103,6 +212,7 @@ export const OfficerDashboardPage = () => {
 
   const handleApproveUnit = async (appId) => {
     setIsSubmittingAction(true);
+    setActionErrorMessage('');
     try {
       const res = await api.patch(`/applications/${appId}/status`, {
         status: 'Approved',
@@ -113,9 +223,13 @@ export const OfficerDashboardPage = () => {
         setTimeout(() => setActionSuccessMessage(''), 4000);
         setAdjudicationNote('');
         fetchData();
+      } else {
+        setActionErrorMessage(res.error || 'Failed to approve application.');
+        setTimeout(() => setActionErrorMessage(''), 8000);
       }
     } catch (err) {
       console.error('Approve error:', err);
+      setActionErrorMessage(err.message || 'Failed to approve application.');
     } finally {
       setIsSubmittingAction(false);
     }
@@ -123,6 +237,7 @@ export const OfficerDashboardPage = () => {
 
   const handleRequestEvidence = async (appId) => {
     setIsSubmittingAction(true);
+    setActionErrorMessage('');
     try {
       const res = await api.patch(`/applications/${appId}/status`, {
         status: 'Information Required',
@@ -133,9 +248,13 @@ export const OfficerDashboardPage = () => {
         setTimeout(() => setActionSuccessMessage(''), 4000);
         setAdjudicationNote('');
         fetchData();
+      } else {
+        setActionErrorMessage(res.error || 'Failed to request evidence.');
+        setTimeout(() => setActionErrorMessage(''), 8000);
       }
     } catch (err) {
       console.error('Request evidence error:', err);
+      setActionErrorMessage(err.message || 'Failed to request evidence.');
     } finally {
       setIsSubmittingAction(false);
     }
@@ -291,6 +410,19 @@ export const OfficerDashboardPage = () => {
           </div>
         )}
 
+        {/* Error Alert Banner */}
+        {actionErrorMessage && (
+          <div className="p-4 rounded-xl bg-red-50 border border-red-300 text-xs text-red-900 flex items-center justify-between shadow-xs">
+            <div className="flex items-center gap-2">
+              <AlertCircle className="w-4 h-4 text-red-600 shrink-0" />
+              <span className="font-semibold">{actionErrorMessage}</span>
+            </div>
+            <button onClick={() => setActionErrorMessage('')} className="text-red-700 hover:text-red-900">
+              <X className="w-4 h-4" />
+            </button>
+          </div>
+        )}
+
         {/* Tab Selector */}
         <div className="flex items-center justify-between border-b border-gov-border bg-white rounded-t-xl px-4 pt-3">
           <div className="flex items-center gap-2">
@@ -346,10 +478,40 @@ export const OfficerDashboardPage = () => {
         </div>
 
         {/* TAB 1: VERIFICATION & DEDUPLICATION QUEUE */}
-        {activeTab === 'queue' && (
+        {activeTab === 'queue' && (() => {
+          const unresolvedDupAlerts = alerts.filter((a) => isDuplicateAlert(a) && isAlertUnresolved(a));
+          const selectedAppAlert = selectedApp
+            ? alerts.find(
+                (a) =>
+                  (a.applicationId === selectedApp.id || a.citizenId === selectedApp.citizenId) &&
+                  isDuplicateAlert(a) &&
+                  isAlertUnresolved(a)
+              )
+            : null;
+
+          return (
           <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 items-start">
             {/* Left Column: Applications List (5 cols) */}
             <div className="lg:col-span-5 bg-white rounded-xl border border-gov-border shadow-xs overflow-hidden">
+              {/* Unresolved Duplicate Alerts Quick Action */}
+              {unresolvedDupAlerts.length > 0 && (
+                <div className="p-3 bg-amber-50 border-b border-amber-200 flex items-center justify-between">
+                  <div className="flex items-center gap-2">
+                    <AlertTriangle className="w-4 h-4 text-amber-600 shrink-0" />
+                    <span className="text-xs font-bold text-amber-950">
+                      {unresolvedDupAlerts.length} Duplicate Household Alert{unresolvedDupAlerts.length > 1 ? 's' : ''} Pending
+                    </span>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => setActivePopupAlert(unresolvedDupAlerts[0])}
+                    className="text-xs font-bold text-amber-800 underline hover:text-amber-950 cursor-pointer"
+                  >
+                    Inspect Alert
+                  </button>
+                </div>
+              )}
+
               <div className="p-4 bg-slate-50 border-b border-gov-border flex items-center justify-between">
                 <div>
                   <h3 className="text-xs font-bold uppercase text-gov-text">Incoming Claims for Review</h3>
@@ -364,7 +526,21 @@ export const OfficerDashboardPage = () => {
                     No applications currently in queue.
                   </div>
                 ) : (
-                  applications.map((app) => (
+                  applications.map((app) => {
+                    const hasDupAlert = alerts.some(
+                      (a) =>
+                        (a.applicationId === app.id || a.citizenId === app.citizenId) &&
+                        isDuplicateAlert(a) &&
+                        isAlertUnresolved(a)
+                    );
+                    const matchedAlert = alerts.find(
+                      (a) =>
+                        (a.applicationId === app.id || a.citizenId === app.citizenId) &&
+                        isDuplicateAlert(a) &&
+                        isAlertUnresolved(a)
+                    );
+
+                    return (
                     <div
                       key={app.id}
                       onClick={() => setSelectedApp(app)}
@@ -389,8 +565,28 @@ export const OfficerDashboardPage = () => {
                         <span>Ref: {app.id}</span>
                         <span>Unit: {app.benefitUnit || 'Household'}</span>
                       </div>
+
+                      {hasDupAlert && (
+                        <div className="mt-2 pt-2 border-t border-slate-100 flex items-center justify-between">
+                          <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded bg-amber-100 text-amber-900 font-bold text-[10px] border border-amber-300">
+                            <AlertTriangle className="w-3 h-3 text-amber-700" />
+                            Potential Duplicate Household
+                          </span>
+                          <button
+                            type="button"
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              if (matchedAlert) setActivePopupAlert(matchedAlert);
+                            }}
+                            className="text-[10px] font-bold text-gov-blue hover:underline cursor-pointer"
+                          >
+                            Inspect Alert
+                          </button>
+                        </div>
+                      )}
                     </div>
-                  ))
+                    );
+                  })
                 )}
               </div>
             </div>
@@ -416,6 +612,62 @@ export const OfficerDashboardPage = () => {
                       Status: {selectedApp.status}
                     </span>
                   </div>
+
+                  {/* Contextual Duplicate Household Alert Banner if attached */}
+                  {selectedAppAlert && (
+                    <div className="p-4 rounded-xl bg-amber-50 border-2 border-amber-400 space-y-3">
+                      <div className="flex items-start justify-between">
+                        <div className="flex items-center gap-2">
+                          <AlertTriangle className="w-5 h-5 text-amber-600 shrink-0" />
+                          <div>
+                            <h4 className="font-extrabold text-amber-950 text-sm">
+                              Potential Existing Household Registration
+                            </h4>
+                            <span className="text-[11px] font-bold text-amber-800 uppercase tracking-wide">
+                              Scope: {selectedAppAlert.details?.eligibilityScope?.toUpperCase() || 'HOUSEHOLD'}-BASED SCHEME
+                            </span>
+                          </div>
+                        </div>
+                        <span className="px-2.5 py-1 rounded text-[10px] font-bold bg-amber-200 text-amber-900 uppercase">
+                          {selectedAppAlert.details?.matchConfidence === 'exact' ? 'Exact Match' : 'Possible Match'}
+                        </span>
+                      </div>
+
+                      <p className="text-xs text-amber-900 leading-relaxed font-medium">
+                        {selectedAppAlert.details?.warning ||
+                          'This citizen may be linked to a household that is already registered for this household-based scheme. Review the existing household, family details and benefit/application status before approving.'}
+                      </p>
+
+                      <div className="bg-white/80 p-3 rounded-lg border border-amber-300 grid grid-cols-2 gap-2 text-xs">
+                        <div>
+                          <span className="text-slate-500 block text-[10px] uppercase font-bold">Matching Reason</span>
+                          <span className="font-semibold text-slate-800 capitalize">
+                            {selectedAppAlert.details?.matchReason?.replace('_', ' ') || 'Family records match'}
+                          </span>
+                        </div>
+                        <div>
+                          <span className="text-slate-500 block text-[10px] uppercase font-bold">Existing Benefit / Application</span>
+                          <span className="font-semibold text-slate-800">
+                            {selectedAppAlert.details?.existingBenefitStatus || 'Registered Household Benefit'}
+                          </span>
+                        </div>
+                      </div>
+
+                      <div className="flex items-center justify-between pt-1">
+                        <span className="text-[11px] text-amber-800 font-medium">
+                          Review required before final approval to prevent duplicate benefit allocation.
+                        </span>
+                        <button
+                          type="button"
+                          onClick={() => setActivePopupAlert(selectedAppAlert)}
+                          className="px-4 py-2 rounded-lg bg-amber-600 hover:bg-amber-700 text-white font-bold text-xs shadow-xs transition-colors flex items-center gap-1.5 cursor-pointer"
+                        >
+                          <Eye className="w-4 h-4" />
+                          <span>Review Duplicate Dossier & Actions</span>
+                        </button>
+                      </div>
+                    </div>
+                  )}
 
                   {/* Dual Dossier Inspection: Current Applicant vs Ancestral Record */}
                   <div>
@@ -539,7 +791,8 @@ export const OfficerDashboardPage = () => {
               )}
             </div>
           </div>
-        )}
+          );
+        })()}
 
         {/* TAB 2: CITIZEN CLARIFICATION APPEALS */}
         {activeTab === 'appeals' && (
@@ -685,6 +938,261 @@ export const OfficerDashboardPage = () => {
                     )}
                   </tbody>
                 </table>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* DUPLICATE HOUSEHOLD VERIFICATION POPUP MODAL */}
+        {activePopupAlert && (
+          <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-950/70 backdrop-blur-xs overflow-y-auto">
+            <div className="bg-white rounded-2xl max-w-2xl w-full border border-gov-border shadow-2xl overflow-hidden my-6 animate-in fade-in zoom-in-95 duration-150">
+              {/* Modal Header */}
+              <div className="bg-[#0e2c4d] text-white p-5 flex items-start justify-between border-b-4 border-amber-500">
+                <div className="flex items-start gap-3">
+                  <div className="w-10 h-10 rounded-xl bg-amber-500 text-slate-950 flex items-center justify-center shrink-0 font-bold mt-0.5">
+                    <AlertTriangle className="w-6 h-6" />
+                  </div>
+                  <div>
+                    <div className="flex flex-wrap items-center gap-2 mb-1">
+                      <span className="font-extrabold text-base text-white">
+                        Duplicate Household Registration Alert
+                      </span>
+                      <span className="px-2 py-0.5 rounded text-[10px] font-bold uppercase bg-amber-500 text-slate-950">
+                        {activePopupAlert.details?.eligibilityScope?.toUpperCase() || 'HOUSEHOLD'}-BASED SCHEME
+                      </span>
+                    </div>
+                    <p className="text-xs text-slate-300">
+                      Official Zonal Adjudication Docket • Alert ID: <code className="font-mono text-amber-300">{activePopupAlert.id}</code>
+                    </p>
+                  </div>
+                </div>
+
+                <button
+                  type="button"
+                  onClick={() => handleDismissPopup(activePopupAlert.id)}
+                  className="p-1.5 rounded-lg bg-white/10 hover:bg-white/20 text-white transition-colors cursor-pointer"
+                  title="Dismiss popup for this session"
+                >
+                  <X className="w-5 h-5" />
+                </button>
+              </div>
+
+              {/* Modal Body */}
+              <div className="p-6 space-y-5 max-h-[75vh] overflow-y-auto">
+                {/* Prominent Mandatory Warning Banner */}
+                <div className="p-4 rounded-xl bg-amber-50 border-2 border-amber-400 space-y-1.5">
+                  <div className="flex items-center gap-2 font-black text-amber-950 text-sm">
+                    <ShieldAlert className="w-5 h-5 text-amber-600 shrink-0" />
+                    <span>Potential Existing Household Registration</span>
+                  </div>
+                  <p className="text-xs text-amber-900 leading-relaxed font-medium">
+                    {activePopupAlert.details?.warning ||
+                      'This citizen may be linked to a household that is already registered for this household-based scheme. Review the existing household, family details and benefit/application status before approving.'}
+                  </p>
+                </div>
+
+                {/* Match Overview Chips */}
+                <div className="grid grid-cols-2 sm:grid-cols-4 gap-2.5">
+                  <div className="p-2.5 rounded-lg bg-slate-50 border border-slate-200">
+                    <span className="text-[10px] uppercase font-bold text-slate-500 block">Target Scheme</span>
+                    <span className="text-xs font-bold text-slate-900 truncate block" title={activePopupAlert.details?.schemeName || activePopupAlert.schemeId}>
+                      {activePopupAlert.details?.schemeName || activePopupAlert.schemeId}
+                    </span>
+                  </div>
+                  <div className="p-2.5 rounded-lg bg-slate-50 border border-slate-200">
+                    <span className="text-[10px] uppercase font-bold text-slate-500 block">Eligibility Scope</span>
+                    <span className="text-xs font-bold text-blue-900 uppercase">
+                      {activePopupAlert.details?.eligibilityScope || 'Household'}
+                    </span>
+                  </div>
+                  <div className="p-2.5 rounded-lg bg-slate-50 border border-slate-200">
+                    <span className="text-[10px] uppercase font-bold text-slate-500 block">Matching Reason</span>
+                    <span className="text-xs font-bold text-amber-800 capitalize truncate block" title={activePopupAlert.details?.matchReason}>
+                      {activePopupAlert.details?.matchReason?.replace('_', ' ') || 'Parents match'}
+                    </span>
+                  </div>
+                  <div className="p-2.5 rounded-lg bg-slate-50 border border-slate-200">
+                    <span className="text-[10px] uppercase font-bold text-slate-500 block">Match Confidence</span>
+                    <span className={`text-xs font-bold ${activePopupAlert.details?.matchConfidence === 'exact' ? 'text-red-700' : 'text-amber-700'}`}>
+                      {activePopupAlert.details?.matchConfidence === 'exact' ? 'Exact Match' : 'Possible Match'}
+                    </span>
+                  </div>
+                </div>
+
+                {/* Side-by-Side Dual Dossier */}
+                <div className="border border-gov-border rounded-xl overflow-hidden">
+                  <div className="bg-slate-100 px-4 py-2.5 border-b border-gov-border">
+                    <h5 className="text-xs font-bold uppercase tracking-wider text-slate-800 flex items-center gap-2">
+                      <Scale className="w-4 h-4 text-gov-blue" />
+                      <span>Demographic Cross-Verification Comparison</span>
+                    </h5>
+                  </div>
+
+                  <div className="grid grid-cols-1 md:grid-cols-2 divide-y md:divide-y-0 md:divide-x divide-gov-border text-xs">
+                    {/* Left: Current Applicant Details */}
+                    <div className="p-4 space-y-2 bg-blue-50/40">
+                      <div className="pb-1 border-b border-blue-200 flex items-center justify-between">
+                        <span className="font-bold text-blue-950 uppercase text-[11px]">Current Citizen Record</span>
+                        <span className="text-[10px] font-mono font-bold bg-blue-100 text-blue-800 px-1.5 py-0.5 rounded">
+                          {activePopupAlert.citizenId || 'CIT-NEW'}
+                        </span>
+                      </div>
+                      <div>
+                        <span className="text-slate-500 text-[10px] block">Citizen Full Name</span>
+                        <span className="font-bold text-slate-900">{activePopupAlert.details?.citizenName || 'Applicant'}</span>
+                      </div>
+                      <div className="grid grid-cols-2 gap-2">
+                        <div>
+                          <span className="text-slate-500 text-[10px] block">Father's Name</span>
+                          <span className="font-medium text-slate-800">{activePopupAlert.details?.fatherName || 'Not recorded'}</span>
+                        </div>
+                        <div>
+                          <span className="text-slate-500 text-[10px] block">Mother's Name</span>
+                          <span className="font-medium text-slate-800">{activePopupAlert.details?.motherName || 'Not recorded'}</span>
+                        </div>
+                      </div>
+                      <div>
+                        <span className="text-slate-500 text-[10px] block">Social Caste Category</span>
+                        <span className="font-medium text-slate-800">
+                          {activePopupAlert.details?.caste ? `${activePopupAlert.details.caste}${activePopupAlert.details.casteOther ? ` (${activePopupAlert.details.casteOther})` : ''}` : 'Not specified'}
+                        </span>
+                      </div>
+                      <div>
+                        <span className="text-slate-500 text-[10px] block">Residential Address</span>
+                        <span className="font-medium text-slate-800 line-clamp-2">
+                          {activePopupAlert.details?.address || activePopupAlert.details?.householdRef || 'Registered Address'}
+                        </span>
+                      </div>
+                    </div>
+
+                    {/* Right: Existing Registered Household Match */}
+                    <div className="p-4 space-y-2 bg-amber-50/40">
+                      <div className="pb-1 border-b border-amber-200 flex items-center justify-between">
+                        <span className="font-bold text-amber-950 uppercase text-[11px]">Existing Registered Household</span>
+                        <span className="text-[10px] font-mono font-bold bg-amber-100 text-amber-800 px-1.5 py-0.5 rounded">
+                          {activePopupAlert.details?.matchedRecord?.householdId || activePopupAlert.details?.existingHouseholdRef || 'HH-EXISTING'}
+                        </span>
+                      </div>
+                      <div>
+                        <span className="text-slate-500 text-[10px] block">Matched Citizen / Head</span>
+                        <span className="font-bold text-slate-900">
+                          {activePopupAlert.details?.matchedRecord?.fullName || activePopupAlert.details?.matchedRecord?.targetBeneficiaryName || 'Existing Registered Beneficiary'}
+                        </span>
+                      </div>
+                      <div className="grid grid-cols-2 gap-2">
+                        <div>
+                          <span className="text-slate-500 text-[10px] block">Father's Name</span>
+                          <span className="font-medium text-slate-800">
+                            {activePopupAlert.details?.matchedRecord?.fatherName || activePopupAlert.details?.matchedRecord?.father_name || activePopupAlert.details?.fatherName || 'Recorded'}
+                          </span>
+                        </div>
+                        <div>
+                          <span className="text-slate-500 text-[10px] block">Mother's Name</span>
+                          <span className="font-medium text-slate-800">
+                            {activePopupAlert.details?.matchedRecord?.motherName || activePopupAlert.details?.matchedRecord?.mother_name || activePopupAlert.details?.motherName || 'Recorded'}
+                          </span>
+                        </div>
+                      </div>
+                      <div>
+                        <span className="text-slate-500 text-[10px] block">Existing Application / Benefit Status</span>
+                        <span className="font-bold text-emerald-800 bg-emerald-50 px-2 py-0.5 rounded inline-block">
+                          {activePopupAlert.details?.existingBenefitStatus || 'Active Allotted Benefit'}
+                        </span>
+                      </div>
+                      <div>
+                        <span className="text-slate-500 text-[10px] block">Registered Address</span>
+                        <span className="font-medium text-slate-800 line-clamp-2">
+                          {activePopupAlert.details?.matchedRecord?.fullAddress || activePopupAlert.details?.matchedRecord?.address || 'Municipal Village Registry'}
+                        </span>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+
+                {/* Officer Determination Reason & Audit Trail Input */}
+                <div className="space-y-2">
+                  <label className="block text-xs font-bold uppercase text-slate-700">
+                    Officer Adjudication Remarks & Legal Justification (Recorded in Audit Trail)
+                  </label>
+                  <textarea
+                    rows={2}
+                    value={alertDecisionReason}
+                    onChange={(e) => setAlertDecisionReason(e.target.value)}
+                    placeholder="Enter formal justification (e.g., Physical field verification confirmed nuclear separation with independent electric meter #883921...)"
+                    className="w-full p-3 rounded-lg border border-gov-border text-xs text-slate-900 placeholder:text-slate-400 focus:outline-none focus:ring-2 focus:ring-gov-blue"
+                  />
+                  <p className="text-[11px] text-slate-500">
+                    Every adjudication action is permanently logged with your official ID, timestamp, and decision reason.
+                  </p>
+                </div>
+
+                {/* 4 Action Buttons */}
+                <div className="pt-2 border-t border-gov-border">
+                  <div className="text-[11px] font-bold uppercase text-slate-600 mb-2.5">
+                    Authorized Adjudication Actions:
+                  </div>
+
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
+                    {/* Action 1: Review Match */}
+                    <button
+                      type="button"
+                      disabled={isSubmittingAlertAction}
+                      onClick={() => handleResolveDuplicateAlert(activePopupAlert.id, 'REVIEW_MATCH')}
+                      className="px-3.5 py-2.5 rounded-lg bg-slate-100 hover:bg-slate-200 text-slate-800 font-bold text-xs transition-colors border border-slate-300 flex items-center justify-center gap-1.5 cursor-pointer disabled:opacity-50"
+                    >
+                      <Eye className="w-4 h-4 text-slate-600" />
+                      <span>Review Match (Hold in Docket)</span>
+                    </button>
+
+                    {/* Action 2: Confirm Same Household */}
+                    <button
+                      type="button"
+                      disabled={isSubmittingAlertAction}
+                      onClick={() => handleResolveDuplicateAlert(activePopupAlert.id, 'CONFIRM_SAME_HOUSEHOLD')}
+                      className="px-3.5 py-2.5 rounded-lg bg-amber-600 hover:bg-amber-700 text-white font-bold text-xs transition-colors shadow-xs flex items-center justify-center gap-1.5 cursor-pointer disabled:opacity-50"
+                    >
+                      <ShieldAlert className="w-4 h-4" />
+                      <span>Confirm Same Household (Flag Duplicate)</span>
+                    </button>
+
+                    {/* Action 3: Mark Different Household */}
+                    <button
+                      type="button"
+                      disabled={isSubmittingAlertAction}
+                      onClick={() => handleResolveDuplicateAlert(activePopupAlert.id, 'MARK_DIFFERENT_HOUSEHOLD')}
+                      className="px-3.5 py-2.5 rounded-lg bg-emerald-700 hover:bg-emerald-800 text-white font-bold text-xs transition-colors shadow-xs flex items-center justify-center gap-1.5 cursor-pointer disabled:opacity-50"
+                    >
+                      <Check className="w-4 h-4" />
+                      <span>Mark Different Household (Clear Flag)</span>
+                    </button>
+
+                    {/* Action 4: Request Additional Verification */}
+                    <button
+                      type="button"
+                      disabled={isSubmittingAlertAction}
+                      onClick={() => handleResolveDuplicateAlert(activePopupAlert.id, 'REQUEST_ADDITIONAL_VERIFICATION')}
+                      className="px-3.5 py-2.5 rounded-lg bg-blue-700 hover:bg-blue-800 text-white font-bold text-xs transition-colors shadow-xs flex items-center justify-center gap-1.5 cursor-pointer disabled:opacity-50"
+                    >
+                      <AlertCircle className="w-4 h-4" />
+                      <span>Request Additional Verification</span>
+                    </button>
+                  </div>
+                </div>
+              </div>
+
+              {/* Modal Footer */}
+              <div className="bg-slate-50 px-6 py-3.5 border-t border-gov-border flex items-center justify-between text-xs">
+                <span className="text-[11px] text-slate-500 font-mono">
+                  Official Session: {user?.email || 'officer@gov.in'}
+                </span>
+                <button
+                  type="button"
+                  onClick={() => handleDismissPopup(activePopupAlert.id)}
+                  className="px-4 py-2 rounded-lg bg-slate-200 hover:bg-slate-300 text-slate-800 font-semibold text-xs transition-colors cursor-pointer"
+                >
+                  Close & Review Later
+                </button>
               </div>
             </div>
           </div>

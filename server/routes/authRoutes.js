@@ -8,12 +8,26 @@ const router = express.Router();
 // POST /api/auth/register
 router.post('/register', async (req, res) => {
   try {
-    const { fullName, mobile, email, password, gender, occupation } = req.body;
+    const { fullName, mobile, email, password, gender, occupation, fatherName, motherName, caste, casteOther, fullAddress } = req.body;
 
     if (!fullName || !mobile || !password) {
       return res.status(400).json({
         success: false,
         error: 'Missing required registration fields: Full Name, Mobile and Password are required.'
+      });
+    }
+
+    if (caste === 'Other' && !casteOther?.trim()) {
+      return res.status(400).json({
+        success: false,
+        error: 'Please specify your caste name when selecting "Other".'
+      });
+    }
+
+    if (fullAddress && fullAddress.trim().length < 5) {
+      return res.status(400).json({
+        success: false,
+        error: 'Please provide a valid residential address (at least 5 characters).'
       });
     }
 
@@ -32,7 +46,12 @@ router.post('/register', async (req, res) => {
       email: email ? email.trim() : '',
       password: password,
       gender: gender || 'Not Specified',
-      occupation: occupation || 'Citizen'
+      occupation: occupation || 'Citizen',
+      fatherName: fatherName ? fatherName.trim() : '',
+      motherName: motherName ? motherName.trim() : '',
+      caste: caste ? caste.trim() : '',
+      casteOther: casteOther ? casteOther.trim() : '',
+      fullAddress: fullAddress ? fullAddress.trim() : ''
     });
 
     const token = generateCitizenToken(newCitizen);
@@ -47,6 +66,11 @@ router.post('/register', async (req, res) => {
       occupation: newCitizen.occupation,
       householdId: newCitizen.householdId,
       address: newCitizen.address,
+      fatherName: newCitizen.fatherName,
+      motherName: newCitizen.motherName,
+      caste: newCitizen.caste,
+      casteOther: newCitizen.casteOther,
+      fullAddress: newCitizen.fullAddress,
       token
     };
 
@@ -177,6 +201,11 @@ router.post('/login', async (req, res) => {
       occupation: citizen.occupation,
       householdId: citizen.householdId,
       address: citizen.address,
+      fatherName: citizen.fatherName || citizen.address?.fatherName || '',
+      motherName: citizen.motherName || citizen.address?.motherName || '',
+      caste: citizen.caste || citizen.address?.caste || '',
+      casteOther: citizen.casteOther || citizen.address?.casteOther || '',
+      fullAddress: citizen.fullAddress || citizen.address?.fullAddress || citizen.address?.addressLine1 || '',
       token
     };
 
@@ -206,9 +235,80 @@ router.get('/me', requireAuth, async (req, res) => {
       gender: citizen.gender,
       occupation: citizen.occupation,
       householdId: citizen.householdId,
-      address: citizen.address
+      address: citizen.address,
+      fatherName: citizen.fatherName || citizen.address?.fatherName || '',
+      motherName: citizen.motherName || citizen.address?.motherName || '',
+      caste: citizen.caste || citizen.address?.caste || '',
+      casteOther: citizen.casteOther || citizen.address?.casteOther || '',
+      fullAddress: citizen.fullAddress || citizen.address?.fullAddress || citizen.address?.addressLine1 || ''
     }
   });
+});
+
+// PUT /api/auth/profile - Update citizen demographic and family profile
+router.put('/profile', requireAuth, async (req, res) => {
+  try {
+    const citizenId = req.citizen.citizenId || req.citizen.id;
+    const { fullName, fatherName, motherName, caste, casteOther, fullAddress, gender, occupation } = req.body;
+
+    if (caste === 'Other' && !casteOther?.trim()) {
+      return res.status(400).json({
+        success: false,
+        error: 'Please specify your caste name when selecting "Other".'
+      });
+    }
+
+    if (fullAddress && fullAddress.trim().length < 5) {
+      return res.status(400).json({
+        success: false,
+        error: 'Please provide a valid residential address (at least 5 characters).'
+      });
+    }
+
+    const updatedCitizen = await db.updateCitizenProfile(citizenId, {
+      fullName,
+      fatherName,
+      motherName,
+      caste,
+      casteOther,
+      fullAddress,
+      gender,
+      occupation
+    });
+
+    const token = generateCitizenToken(updatedCitizen);
+
+    const sessionUser = {
+      id: updatedCitizen.id,
+      citizenId: updatedCitizen.citizenId,
+      fullName: updatedCitizen.fullName,
+      mobile: updatedCitizen.mobile,
+      email: updatedCitizen.email,
+      gender: updatedCitizen.gender,
+      occupation: updatedCitizen.occupation,
+      householdId: updatedCitizen.householdId,
+      address: updatedCitizen.address,
+      fatherName: updatedCitizen.fatherName,
+      motherName: updatedCitizen.motherName,
+      caste: updatedCitizen.caste,
+      casteOther: updatedCitizen.casteOther,
+      fullAddress: updatedCitizen.fullAddress,
+      token
+    };
+
+    res.json({
+      success: true,
+      message: 'Citizen profile and family details updated successfully in database.',
+      user: sessionUser,
+      token
+    });
+  } catch (err) {
+    console.error('Update profile error:', err);
+    res.status(500).json({
+      success: false,
+      error: err.message || 'Failed to update citizen profile.'
+    });
+  }
 });
 
 // POST /api/auth/recover

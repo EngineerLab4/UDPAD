@@ -5,6 +5,12 @@ import { createClient } from '@supabase/supabase-js';
 import pg from 'pg';
 import { config } from '../config.js';
 import { schemesData, createInitialCitizen, createInitialHousehold } from './seedData.js';
+import {
+  compareCitizenFamily,
+  getSchemeEligibilityScope,
+  compareAddresses,
+  extractAddressText
+} from '../utils/deduplication.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -53,7 +59,8 @@ function mapSchemeRow(s) {
     verificationStatus: s.verification_status || 'Verified',
     benefitUnitExplanation: s.benefit_unit_explanation || '',
     applicationStatus: s.application_status || 'Open',
-    faq: s.faq || []
+    faq: s.faq || [],
+    eligibilityScope: s.eligibility_scope || (['Household', 'Dwelling / Facility'].includes(s.benefit_unit) ? 'household' : 'individual')
   };
 }
 
@@ -202,6 +209,7 @@ class DatabaseManager {
       }
 
       if (data) {
+        const addressObj = typeof data.address === 'object' && data.address !== null ? data.address : {};
         return {
           ...data,
           citizenId: data.citizen_id,
@@ -209,7 +217,12 @@ class DatabaseManager {
           password: data.password_hash,
           incomeCategory: data.income_category,
           annualIncome: data.annual_income,
-          householdId: data.household_id
+          householdId: data.household_id,
+          fatherName: data.father_name || addressObj.fatherName || '',
+          motherName: data.mother_name || addressObj.motherName || '',
+          caste: data.caste || addressObj.caste || '',
+          casteOther: data.caste_other || addressObj.casteOther || '',
+          fullAddress: data.full_address || addressObj.fullAddress || addressObj.addressLine1 || (typeof data.address === 'string' ? data.address : '')
         };
       }
       return null;
@@ -248,6 +261,7 @@ class DatabaseManager {
       }
 
       if (data) {
+        const addressObj = typeof data.address === 'object' && data.address !== null ? data.address : {};
         return {
           ...data,
           citizenId: data.citizen_id,
@@ -255,7 +269,12 @@ class DatabaseManager {
           password: data.password_hash,
           incomeCategory: data.income_category,
           annualIncome: data.annual_income,
-          householdId: data.household_id
+          householdId: data.household_id,
+          fatherName: data.father_name || addressObj.fatherName || '',
+          motherName: data.mother_name || addressObj.motherName || '',
+          caste: data.caste || addressObj.caste || '',
+          casteOther: data.caste_other || addressObj.casteOther || '',
+          fullAddress: data.full_address || addressObj.fullAddress || addressObj.addressLine1 || (typeof data.address === 'string' ? data.address : '')
         };
       }
       return null;
@@ -264,33 +283,94 @@ class DatabaseManager {
     return this.store.citizens.find((c) => c.id === id || c.citizenId === id) || null;
   }
 
+  async getAllCitizens() {
+    await this.ensureReady();
+    if (this.mode === 'supabase' && this.supabase) {
+      const { data, error } = await this.supabase
+        .from('citizens')
+        .select('*')
+        .order('created_at', { ascending: false });
+      if (error) {
+        console.warn('getAllCitizens Supabase error:', error.message);
+        return [];
+      }
+      return (data || []).map((d) => {
+        const addressObj = typeof d.address === 'object' && d.address !== null ? d.address : {};
+        return {
+          ...d,
+          citizenId: d.citizen_id,
+          fullName: d.full_name,
+          mobile: d.mobile,
+          email: d.email,
+          gender: d.gender,
+          occupation: d.occupation,
+          incomeCategory: d.income_category,
+          annualIncome: d.annual_income,
+          householdId: d.household_id,
+          fatherName: d.father_name || addressObj.fatherName || '',
+          motherName: d.mother_name || addressObj.motherName || '',
+          caste: d.caste || addressObj.caste || '',
+          casteOther: d.caste_other || addressObj.casteOther || '',
+          fullAddress: d.full_address || addressObj.fullAddress || addressObj.addressLine1 || (typeof d.address === 'string' ? d.address : '')
+        };
+      });
+    }
+    return this.store.citizens;
+  }
+
   async createCitizen(data) {
     await this.ensureReady();
     const newCitizen = createInitialCitizen(data);
     newCitizen.password = data.password;
 
     if (this.mode === 'supabase' && this.supabase) {
-      const { data: inserted, error } = await this.supabase
-        .from('citizens')
-        .insert({
-          id: newCitizen.id,
-          citizen_id: newCitizen.citizenId,
-          full_name: newCitizen.fullName,
-          mobile: newCitizen.mobile,
-          email: newCitizen.email,
-          password_hash: newCitizen.password,
-          gender: newCitizen.gender,
-          occupation: newCitizen.occupation,
-          income_category: newCitizen.incomeCategory,
-          annual_income: newCitizen.annualIncome,
-          household_id: newCitizen.householdId,
-          address: newCitizen.address
-        })
-        .select()
-        .single();
+      const basePayload = {
+        id: newCitizen.id,
+        citizen_id: newCitizen.citizenId,
+        full_name: newCitizen.fullName,
+        mobile: newCitizen.mobile,
+        email: newCitizen.email,
+        password_hash: newCitizen.password,
+        gender: newCitizen.gender,
+        occupation: newCitizen.occupation,
+        income_category: newCitizen.incomeCategory,
+        annual_income: newCitizen.annualIncome,
+        household_id: newCitizen.householdId,
+        address: newCitizen.address
+      };
 
-      if (error) {
-        throw new Error(`Supabase create citizen error: ${error.message}`);
+      try {
+        const res = await this.supabase
+          .from('citizens')
+          .insert({
+            ...basePayload,
+            father_name: newCitizen.fatherName,
+            mother_name: newCitizen.motherName,
+            caste: newCitizen.caste,
+            caste_other: newCitizen.casteOther,
+            full_address: newCitizen.fullAddress
+          })
+          .select()
+          .single();
+        if (res.error) {
+          const resFallback = await this.supabase
+            .from('citizens')
+            .insert(basePayload)
+            .select()
+            .single();
+          if (resFallback.error) {
+            throw new Error(`Supabase create citizen error: ${resFallback.error.message}`);
+          }
+        }
+      } catch (err) {
+        const resFallback = await this.supabase
+          .from('citizens')
+          .insert(basePayload)
+          .select()
+          .single();
+        if (resFallback.error) {
+          throw new Error(`Supabase create citizen error: ${resFallback.error.message}`);
+        }
       }
 
       // Initialize household in Supabase
@@ -302,20 +382,20 @@ class DatabaseManager {
         address: initialHh.address
       });
 
-      const headMember = initialHh.members?.[0];
-      if (headMember) {
+      // Insert all members (Head, Father, Mother if provided)
+      for (const member of (initialHh.members || [])) {
         await this.supabase.from('household_members').insert({
-          member_ref: headMember.id,
+          member_ref: member.id,
           household_ref: initialHh.householdId,
-          full_name: headMember.fullName,
-          relation: headMember.relation,
-          citizen_id: headMember.citizenId,
-          age: headMember.age,
-          gender: headMember.gender,
-          occupation: headMember.occupation,
-          education: headMember.education,
-          status: headMember.status,
-          is_head: true,
+          full_name: member.fullName,
+          relation: member.relation,
+          citizen_id: member.citizenId || null,
+          age: member.age,
+          gender: member.gender,
+          occupation: member.occupation,
+          education: member.education,
+          status: member.status,
+          is_head: !!member.isHead,
           independent_benefits_allowed: true
         });
       }
@@ -333,6 +413,13 @@ class DatabaseManager {
         });
       }
 
+      // Trigger non-blocking duplicate detection on registration
+      try {
+        await this.checkDuplicatesForCitizen(newCitizen);
+      } catch (e) {
+        console.warn('Duplicate check warning on registration:', e.message);
+      }
+
       return newCitizen;
     }
 
@@ -341,7 +428,175 @@ class DatabaseManager {
     const initialHh = createInitialHousehold(newCitizen);
     this.store.households.set(newCitizen.citizenId, initialHh);
     this.store.households.set(newCitizen.householdId, initialHh);
+
+    try {
+      await this.checkDuplicatesForCitizen(newCitizen);
+    } catch (e) {
+      // ignore
+    }
+
     return newCitizen;
+  }
+
+  async updateCitizenProfile(citizenId, profileData) {
+    await this.ensureReady();
+    const existing = await this.getCitizenById(citizenId);
+    if (!existing) {
+      throw new Error(`Citizen record ${citizenId} not found.`);
+    }
+
+    const updatedFullName = profileData.fullName ? profileData.fullName.trim() : existing.fullName;
+    const updatedFatherName = profileData.fatherName !== undefined ? profileData.fatherName.trim() : (existing.fatherName || '');
+    const updatedMotherName = profileData.motherName !== undefined ? profileData.motherName.trim() : (existing.motherName || '');
+    const updatedCaste = profileData.caste !== undefined ? profileData.caste.trim() : (existing.caste || '');
+    const updatedCasteOther = profileData.casteOther !== undefined ? profileData.casteOther.trim() : (existing.casteOther || '');
+    const updatedFullAddress = profileData.fullAddress !== undefined ? profileData.fullAddress.trim() : (existing.fullAddress || '');
+    const updatedGender = profileData.gender || existing.gender;
+    const updatedOccupation = profileData.occupation || existing.occupation;
+
+    const existingAddress = typeof existing.address === 'object' && existing.address !== null ? existing.address : {};
+    const updatedAddressObj = {
+      ...existingAddress,
+      dwellingType: existingAddress.dwellingType || 'Residential',
+      addressLine1: updatedFullAddress || existingAddress.addressLine1 || 'Residential Address',
+      fullAddress: updatedFullAddress,
+      fatherName: updatedFatherName,
+      motherName: updatedMotherName,
+      caste: updatedCaste,
+      casteOther: updatedCasteOther
+    };
+
+    if (this.mode === 'supabase' && this.supabase) {
+      const updatePayload = {
+        full_name: updatedFullName,
+        gender: updatedGender,
+        occupation: updatedOccupation,
+        address: updatedAddressObj,
+        updated_at: new Date().toISOString()
+      };
+
+      try {
+        const { error: tryColsError } = await this.supabase
+          .from('citizens')
+          .update({
+            ...updatePayload,
+            father_name: updatedFatherName,
+            mother_name: updatedMotherName,
+            caste: updatedCaste,
+            caste_other: updatedCasteOther,
+            full_address: updatedFullAddress
+          })
+          .eq('citizen_id', citizenId);
+
+        if (tryColsError) {
+          const { error: fallbackError } = await this.supabase
+            .from('citizens')
+            .update(updatePayload)
+            .eq('citizen_id', citizenId);
+          if (fallbackError) {
+            throw new Error(`Failed to update citizen in Supabase: ${fallbackError.message}`);
+          }
+        }
+      } catch (err) {
+        const { error: fallbackError } = await this.supabase
+          .from('citizens')
+          .update(updatePayload)
+          .eq('citizen_id', citizenId);
+        if (fallbackError) {
+          throw new Error(`Failed to update citizen in Supabase: ${fallbackError.message}`);
+        }
+      }
+
+      // Update household address in Supabase
+      if (existing.householdId && updatedFullAddress) {
+        await this.supabase
+          .from('households')
+          .update({ address: updatedFullAddress, head_of_household: updatedFullName, last_updated: new Date().toISOString().split('T')[0] })
+          .eq('household_ref', existing.householdId);
+
+        await this.supabase
+          .from('household_dwellings')
+          .update({ address: updatedFullAddress })
+          .eq('household_ref', existing.householdId);
+      }
+
+      // Sync Father and Mother in household_members
+      if (existing.householdId) {
+        const { data: currentMembers } = await this.supabase
+          .from('household_members')
+          .select('*')
+          .eq('household_ref', existing.householdId);
+
+        if (updatedFatherName) {
+          const fatherMember = (currentMembers || []).find((m) => m.relation === 'Father');
+          if (fatherMember) {
+            await this.supabase
+              .from('household_members')
+              .update({ full_name: updatedFatherName })
+              .eq('id', fatherMember.id);
+          } else {
+            await this.supabase.from('household_members').insert({
+              member_ref: `MEM-0${(currentMembers?.length || 1) + 1}`,
+              household_ref: existing.householdId,
+              full_name: updatedFatherName,
+              relation: 'Father',
+              age: 62,
+              gender: 'Male',
+              occupation: 'Senior Dependent',
+              education: 'Secondary',
+              status: 'Current Resident',
+              is_head: false,
+              independent_benefits_allowed: true
+            });
+          }
+        }
+
+        if (updatedMotherName) {
+          const motherMember = (currentMembers || []).find((m) => m.relation === 'Mother');
+          if (motherMember) {
+            await this.supabase
+              .from('household_members')
+              .update({ full_name: updatedMotherName })
+              .eq('id', motherMember.id);
+          } else {
+            await this.supabase.from('household_members').insert({
+              member_ref: `MEM-0${(currentMembers?.length || 1) + 2}`,
+              household_ref: existing.householdId,
+              full_name: updatedMotherName,
+              relation: 'Mother',
+              age: 58,
+              gender: 'Female',
+              occupation: 'Senior Dependent',
+              education: 'Secondary',
+              status: 'Current Resident',
+              is_head: false,
+              independent_benefits_allowed: true
+            });
+          }
+        }
+      }
+    } else {
+      existing.fullName = updatedFullName;
+      existing.gender = updatedGender;
+      existing.occupation = updatedOccupation;
+      existing.fatherName = updatedFatherName;
+      existing.motherName = updatedMotherName;
+      existing.caste = updatedCaste;
+      existing.casteOther = updatedCasteOther;
+      existing.fullAddress = updatedFullAddress;
+      existing.address = updatedAddressObj;
+    }
+
+    const updatedCitizen = await this.getCitizenById(citizenId);
+
+    // Run duplicate detection on profile update
+    try {
+      await this.checkDuplicatesForCitizen(updatedCitizen);
+    } catch (e) {
+      console.warn('Duplicate check warning on profile update:', e.message);
+    }
+
+    return updatedCitizen;
   }
 
   // --------------------------------------------------------------------------
@@ -723,12 +978,40 @@ class DatabaseManager {
     return this.store.applications;
   }
 
-  async updateApplicationStatus(id, { status, statusNote, officerName }) {
+  async updateApplicationStatus(id, { status, statusNote, officerName, hasActiveAlert }) {
     await this.ensureReady();
     const today = new Date().toISOString().split('T')[0];
 
     const currentApp = await this.getApplicationById(id);
     if (!currentApp) return null;
+
+    // RACE CONDITION & PRE-APPROVAL RECHECK FOR HOUSEHOLD SCHEMES
+    if (status === 'Approved') {
+      const scheme = currentApp.schemeId ? await this.getSchemeById(currentApp.schemeId) : null;
+      const scope = getSchemeEligibilityScope(scheme);
+      if (scope === 'household') {
+        const allApps = await this.getAllApplications();
+        const allBenefits = await this.getAllBenefits();
+
+        const priorApproved = allApps.find(
+          (a) =>
+            a.id !== id &&
+            a.schemeId === currentApp.schemeId &&
+            a.status === 'Approved' &&
+            (a.householdRef === currentApp.householdRef || a.citizenId === currentApp.citizenId)
+        );
+
+        const priorBenefit = allBenefits.find(
+          (b) =>
+            (b.householdRef === currentApp.householdRef || b.citizenId === currentApp.citizenId) &&
+            (b.schemeCode === scheme?.code || b.benefitName?.toLowerCase().includes(scheme?.name?.toLowerCase()))
+        );
+
+        if (priorApproved || priorBenefit) {
+          throw new Error(`CONCURRENT_DUPLICATE_HOUSEHOLD_APPROVAL: Cannot approve application. A benefit or approved application for this household-based scheme (${scheme?.name || currentApp.schemeName}) already exists for household ${currentApp.householdRef}.`);
+        }
+      }
+    }
 
     const newTimelineItem = {
       title: `Official Status Update: ${status}`,
@@ -738,16 +1021,20 @@ class DatabaseManager {
     };
 
     const updatedTimeline = [newTimelineItem, ...(currentApp.timeline || [])];
+    const updateObj = {
+      status,
+      status_note: statusNote || currentApp.statusNote,
+      last_updated: today,
+      timeline: updatedTimeline
+    };
+    if (hasActiveAlert !== undefined) {
+      updateObj.has_active_alert = hasActiveAlert;
+    }
 
     if (this.mode === 'supabase' && this.supabase) {
       const { data, error } = await this.supabase
         .from('applications')
-        .update({
-          status,
-          status_note: statusNote || currentApp.statusNote,
-          last_updated: today,
-          timeline: updatedTimeline
-        })
+        .update(updateObj)
         .eq('id', id)
         .select('*')
         .maybeSingle();
@@ -755,6 +1042,25 @@ class DatabaseManager {
       if (error) {
         throw new Error(`Supabase updateApplicationStatus error: ${error.message}`);
       }
+
+      if (status === 'Approved') {
+        const scheme = currentApp.schemeId ? await this.getSchemeById(currentApp.schemeId) : null;
+        try {
+          await this.addBenefit(currentApp.citizenId, {
+            householdRef: currentApp.householdRef,
+            benefitName: currentApp.schemeName,
+            schemeCode: scheme?.code || currentApp.schemeId,
+            benefitUnit: currentApp.benefitUnit || 'Household',
+            recipientName: currentApp.targetBeneficiaryName || 'Beneficiary',
+            amountOrItem: scheme?.benefitAmount || 'Approved Welfare Grant',
+            deliveringAgency: currentApp.department || 'UDPAD Administrative Authority',
+            status: 'Active Allotment'
+          });
+        } catch (e) {
+          console.warn('Could not record benefit allotment on approval:', e.message);
+        }
+      }
+
       return data;
     }
 
@@ -762,6 +1068,24 @@ class DatabaseManager {
     currentApp.statusNote = statusNote || currentApp.statusNote;
     currentApp.lastUpdated = today;
     currentApp.timeline = updatedTimeline;
+    if (hasActiveAlert !== undefined) {
+      currentApp.hasActiveAlert = hasActiveAlert;
+    }
+
+    if (status === 'Approved') {
+      const scheme = currentApp.schemeId ? await this.getSchemeById(currentApp.schemeId) : null;
+      await this.addBenefit(currentApp.citizenId, {
+        householdRef: currentApp.householdRef,
+        benefitName: currentApp.schemeName,
+        schemeCode: scheme?.code || currentApp.schemeId,
+        benefitUnit: currentApp.benefitUnit || 'Household',
+        recipientName: currentApp.targetBeneficiaryName || 'Beneficiary',
+        amountOrItem: scheme?.benefitAmount || 'Approved Welfare Grant',
+        deliveringAgency: currentApp.department || 'UDPAD Administrative Authority',
+        status: 'Active Allotment'
+      });
+    }
+
     return currentApp;
   }
 
@@ -870,13 +1194,37 @@ class DatabaseManager {
         last_updated: newApp.lastUpdated,
         status: newApp.status,
         status_note: newApp.statusNote,
-        has_active_alert: false,
+        has_active_alert: newApp.hasActiveAlert,
+        alert_id: newApp.alertId,
         timeline: newApp.timeline,
         documents_uploaded: newApp.documentsUploaded
       });
 
       if (error) {
         throw new Error(`Supabase createApplication error: ${error.message}`);
+      }
+
+      // Run duplicate detection on application now that it safely exists in applications table
+      try {
+        const dupResult = await this.checkDuplicatesForApplication(newApp, citizen, scheme);
+        if (dupResult?.hasAlert && dupResult.alert) {
+          newApp.hasActiveAlert = true;
+          newApp.alertId = dupResult.alert.id;
+          newApp.status = 'Flagged for Official Review';
+          newApp.statusNote = dupResult.alert.message;
+
+          await this.supabase
+            .from('applications')
+            .update({
+              has_active_alert: true,
+              alert_id: dupResult.alert.id,
+              status: 'Flagged for Official Review',
+              status_note: dupResult.alert.message
+            })
+            .eq('id', newApp.id);
+        }
+      } catch (e) {
+        console.warn('Duplicate check warning in createApplication:', e.message);
       }
 
       await this.addNotification(citizen?.citizenId, {
@@ -888,6 +1236,19 @@ class DatabaseManager {
       });
 
       return newApp;
+    }
+
+    // Run duplicate detection for in-memory store
+    try {
+      const dupResult = await this.checkDuplicatesForApplication(newApp, citizen, scheme);
+      if (dupResult?.hasAlert && dupResult.alert) {
+        newApp.hasActiveAlert = true;
+        newApp.alertId = dupResult.alert.id;
+        newApp.status = 'Flagged for Official Review';
+        newApp.statusNote = dupResult.alert.message;
+      }
+    } catch (e) {
+      console.warn('Duplicate check warning in store createApplication:', e.message);
     }
 
     this.store.applications.unshift(newApp);
@@ -968,14 +1329,23 @@ class DatabaseManager {
     return this.store.alerts;
   }
 
-  async updateAlertStatus(id, { status, resolutionNote }) {
+  async updateAlertStatus(id, { status, resolutionNote, updatedDetails }) {
     await this.ensureReady();
 
     if (this.mode === 'supabase' && this.supabase) {
+      const existing = await this.getAlertById(id);
+      const mergedDetails = {
+        ...(existing?.details || {}),
+        status,
+        resolutionNote,
+        resolvedAt: new Date().toISOString(),
+        ...(updatedDetails || {})
+      };
+
       const { data, error } = await this.supabase
         .from('verification_alerts')
         .update({
-          details: { status, resolutionNote, resolvedAt: new Date().toISOString() }
+          details: mergedDetails
         })
         .eq('id', id)
         .select('*')
@@ -989,7 +1359,12 @@ class DatabaseManager {
 
     const alert = this.store.alerts.find((a) => a.id === id);
     if (alert) {
-      alert.details = { ...(alert.details || {}), status, resolutionNote };
+      alert.details = {
+        ...(alert.details || {}),
+        status,
+        resolutionNote,
+        ...(updatedDetails || {})
+      };
     }
     return alert;
   }
@@ -1069,6 +1444,400 @@ class DatabaseManager {
 
     this.store.alerts.unshift(newAlert);
     return newAlert;
+  }
+
+  async createOrUpdateAlert(alertData) {
+    await this.ensureReady();
+    const all = await this.getAllAlerts();
+    const existing = all.find(
+      (a) =>
+        a.citizenId === alertData.citizenId &&
+        a.alertType === alertData.alertType &&
+        (!alertData.schemeId || a.schemeId === alertData.schemeId) &&
+        (!a.details?.status || !a.details.status.startsWith('Resolved'))
+    );
+
+    if (existing) {
+      return this.updateAlertStatus(existing.id, {
+        status: existing.details?.status || 'unresolved',
+        resolutionNote: existing.details?.resolutionNote || '',
+        updatedDetails: {
+          ...(existing.details || {}),
+          ...(alertData.details || {}),
+          updatedAt: new Date().toISOString()
+        }
+      });
+    }
+
+    return this.createAlert(alertData);
+  }
+
+  async resolveDuplicateAlert(alertId, officer, action, decisionReason) {
+    await this.ensureReady();
+    const alert = await this.getAlertById(alertId);
+    if (!alert) {
+      throw new Error(`Alert ${alertId} not found.`);
+    }
+
+    const timestamp = new Date().toISOString();
+    const officerId = officer?.officialId || officer?.citizenId || officer?.id || 'GOV-OFFICER-01';
+    const officerName = officer?.fullName || 'Zonal Field Verification Officer';
+
+    let newStatus = 'Resolved';
+    if (action === 'CONFIRM_SAME_HOUSEHOLD') {
+      newStatus = 'Resolved — Confirmed Same Household';
+    } else if (action === 'MARK_DIFFERENT_HOUSEHOLD') {
+      newStatus = 'Resolved — Separate Household Verified';
+    } else if (action === 'REQUEST_ADDITIONAL_VERIFICATION') {
+      newStatus = 'Under Clarification — Evidence Requested';
+    } else if (action === 'REVIEW_MATCH') {
+      newStatus = 'In Review';
+    }
+
+    const auditEntry = {
+      action,
+      decisionReason: decisionReason || 'Officer reviewed demographic and dwelling dossier.',
+      officerId,
+      officerName,
+      timestamp
+    };
+
+    const updatedDetails = {
+      ...(alert.details || {}),
+      status: newStatus,
+      resolutionAction: action,
+      resolutionNote: decisionReason,
+      resolvedBy: officerName,
+      resolvedById: officerId,
+      resolvedAt: timestamp,
+      auditTrail: [...(alert.details?.auditTrail || []), auditEntry]
+    };
+
+    if (this.mode === 'supabase' && this.supabase) {
+      await this.supabase
+        .from('verification_alerts')
+        .update({ details: updatedDetails })
+        .eq('id', alertId);
+
+      try {
+        await this.supabase.from('deduplication_audit_logs').insert({
+          alert_id: alertId,
+          application_id: alert.applicationId,
+          citizen_id: alert.citizenId,
+          officer_id: officerId,
+          officer_name: officerName,
+          action,
+          decision_reason: decisionReason,
+          match_details: alert.details
+        });
+      } catch (e) {
+        // Safe fallback
+      }
+    } else {
+      alert.details = updatedDetails;
+    }
+
+    if (alert.applicationId) {
+      const app = await this.getApplicationById(alert.applicationId);
+      if (app) {
+        if (action === 'MARK_DIFFERENT_HOUSEHOLD') {
+          await this.updateApplicationStatus(alert.applicationId, {
+            status: app.status === 'Flagged for Official Review' ? 'Under Verification' : app.status,
+            statusNote: `Separate household verified by official ${officerName}. Overlap flag cleared.`,
+            hasActiveAlert: false,
+            officerName
+          });
+        } else if (action === 'CONFIRM_SAME_HOUSEHOLD') {
+          await this.updateApplicationStatus(alert.applicationId, {
+            status: 'Flagged for Official Review',
+            statusNote: `Duplicate household registration confirmed by official ${officerName}: ${decisionReason}`,
+            hasActiveAlert: true,
+            officerName
+          });
+        } else if (action === 'REQUEST_ADDITIONAL_VERIFICATION') {
+          await this.updateApplicationStatus(alert.applicationId, {
+            status: 'Information Required',
+            statusNote: `Official Notice: ${decisionReason}`,
+            hasActiveAlert: true,
+            officerName
+          });
+        }
+      }
+    }
+
+    return {
+      success: true,
+      alertId,
+      status: newStatus,
+      audit: auditEntry
+    };
+  }
+
+  async checkDuplicatesForCitizen(candidate) {
+    if (!candidate) return [];
+    const allCitizens = await this.getAllCitizens();
+    const matches = [];
+
+    for (const existing of allCitizens) {
+      if (existing.citizenId === candidate.citizenId || existing.id === candidate.id) continue;
+      const match = compareCitizenFamily(candidate, existing);
+      if (match) {
+        matches.push(match);
+        await this.createOrUpdateAlert({
+          applicationId: null,
+          citizenId: candidate.citizenId,
+          schemeId: null,
+          alertType: 'DUPLICATE_SUSPICION',
+          severity: match.matchCategory === 'exact' ? 'warning' : 'info',
+          title: 'Potential Duplicate Family / Household Record Detected',
+          message: `${match.matchingReason}. Cross-referencing against existing citizen record ${match.matchedCitizenName} (${match.matchedCitizenId}).`,
+          details: {
+            ...match,
+            isDuplicateAlert: true,
+            status: 'unresolved',
+            citizenName: candidate.fullName,
+            citizenId: candidate.citizenId,
+            fatherName: candidate.fatherName,
+            motherName: candidate.motherName,
+            address: candidate.fullAddress,
+            caste: candidate.caste,
+            casteOther: candidate.casteOther,
+            matchReason: match.reason,
+            matchConfidence: match.matchCategory,
+            matchingReason: match.matchingReason,
+            existingBenefitStatus: 'Existing Registered Family Record',
+            warning:
+              'Potential Existing Household Registration: This citizen shares parental lineage or residence with an existing registered household. Official verification recommended before approving household benefits.',
+            matchedRecord: {
+              fullName: match.matchedCitizenName,
+              citizenId: match.matchedCitizenId,
+              fatherName: match.matchedFatherName,
+              motherName: match.matchedMotherName,
+              fullAddress: match.matchedAddress,
+              householdId: match.matchedHouseholdId
+            },
+            candidateCitizenId: candidate.citizenId,
+            candidateFullName: candidate.fullName,
+            candidateFatherName: candidate.fatherName,
+            candidateMotherName: candidate.motherName,
+            candidateAddress: candidate.fullAddress,
+            detectedAt: new Date().toISOString()
+          },
+          suggestedActions: [
+            { label: 'Review Match', action: 'REVIEW_MATCH' },
+            { label: 'Confirm Same Household', action: 'CONFIRM_SAME_HOUSEHOLD' },
+            { label: 'Mark Different Household', action: 'MARK_DIFFERENT_HOUSEHOLD' },
+            { label: 'Request Additional Verification', action: 'REQUEST_ADDITIONAL_VERIFICATION' }
+          ]
+        });
+      }
+    }
+    return matches;
+  }
+
+  async checkDuplicatesForApplication(candidateApp, citizen, scheme) {
+    const scope = getSchemeEligibilityScope(scheme);
+    const allCitizens = await this.getAllCitizens();
+    const matches = [];
+
+    for (const existing of allCitizens) {
+      if (existing.citizenId === citizen.citizenId || existing.id === citizen.id) continue;
+      const match = compareCitizenFamily(citizen, existing);
+      if (match) {
+        matches.push({ match, existing });
+      }
+    }
+
+    if (scope === 'household') {
+      const allApps = await this.getAllApplications();
+      const allBenefits = await this.getAllBenefits();
+
+      for (const { match, existing } of matches) {
+        const priorApp = allApps.find(
+          (a) =>
+            (a.citizenId === existing.citizenId || a.householdRef === existing.householdId) &&
+            a.schemeId === scheme?.id &&
+            a.id !== candidateApp.id &&
+            a.status !== 'Rejected'
+        );
+
+        const priorBenefit = allBenefits.find(
+          (b) =>
+            (b.citizenId === existing.citizenId || b.householdRef === existing.householdId) &&
+            (b.schemeCode === scheme?.code || b.benefitName?.toLowerCase().includes(scheme?.name?.toLowerCase()))
+        );
+
+        if (priorApp || priorBenefit) {
+          const statusText = priorBenefit ? 'Benefit Already Disbursed' : `Application Status: ${priorApp.status}`;
+          const alert = await this.createAlert({
+            applicationId: candidateApp.id,
+            citizenId: citizen.citizenId,
+            schemeId: scheme?.id || 'SCH-01',
+            alertType: 'DUPLICATE_SUSPICION',
+            severity: 'warning',
+            title: 'Potential Existing Household Registration',
+            message:
+              'This citizen may be linked to a household that is already registered for this household-based scheme. Review the existing household, family details and benefit/application status before approving.',
+            details: {
+              ...match,
+              isDuplicateAlert: true,
+              citizenName: citizen.fullName,
+              citizenId: citizen.citizenId,
+              fatherName: citizen.fatherName,
+              motherName: citizen.motherName,
+              address: citizen.fullAddress,
+              caste: citizen.caste,
+              casteOther: citizen.casteOther,
+              schemeName: scheme?.name || candidateApp.schemeName,
+              schemeCode: scheme?.code || '',
+              eligibilityScope: 'household',
+              matchReason: match.reason,
+              matchConfidence: match.matchCategory,
+              existingHouseholdRef: existing.householdId,
+              existingBeneficiaryName: existing.fullName,
+              existingBenefitStatus: statusText,
+              warning:
+                'Potential Existing Household Registration: This citizen may be linked to a household that is already registered for this household-based scheme. Review the existing household, family details and benefit/application status before approving.',
+              matchedRecord: {
+                fullName: existing.fullName,
+                citizenId: existing.citizenId,
+                fatherName: existing.fatherName,
+                motherName: existing.motherName,
+                fullAddress: existing.fullAddress,
+                householdId: existing.householdId
+              },
+              priorApplicationId: priorApp?.id || null,
+              priorBenefitId: priorBenefit?.id || null,
+              status: 'unresolved',
+              actions: [
+                'Review Match',
+                'Confirm Same Household',
+                'Mark Different Household',
+                'Request Additional Verification'
+              ]
+            },
+            suggestedActions: [
+              { label: 'Review Match', action: 'REVIEW_MATCH' },
+              { label: 'Confirm Same Household', action: 'CONFIRM_SAME_HOUSEHOLD' },
+              { label: 'Mark Different Household', action: 'MARK_DIFFERENT_HOUSEHOLD' },
+              { label: 'Request Additional Verification', action: 'REQUEST_ADDITIONAL_VERIFICATION' }
+            ]
+          });
+
+          return { hasAlert: true, alert, matches };
+        }
+      }
+
+      if (matches.length > 0) {
+        const topMatch = matches[0].match;
+        const matchedExisting = matches[0].existing;
+        const alert = await this.createAlert({
+          applicationId: candidateApp.id,
+          citizenId: citizen.citizenId,
+          schemeId: scheme?.id || 'SCH-01',
+          alertType: 'DUPLICATE_SUSPICION',
+          severity: topMatch.matchCategory === 'exact' ? 'warning' : 'info',
+          title: 'Potential Existing Household Registration',
+          message: `${topMatch.matchingReason}. Cross-referencing against existing citizen record ${topMatch.matchedCitizenName} (${topMatch.matchedCitizenId}).`,
+          details: {
+            ...topMatch,
+            isDuplicateAlert: true,
+            citizenName: citizen.fullName,
+            citizenId: citizen.citizenId,
+            fatherName: citizen.fatherName,
+            motherName: citizen.motherName,
+            address: citizen.fullAddress,
+            caste: citizen.caste,
+            casteOther: citizen.casteOther,
+            schemeName: scheme?.name || candidateApp.schemeName,
+            schemeCode: scheme?.code || '',
+            eligibilityScope: 'household',
+            matchReason: topMatch.reason,
+            matchConfidence: topMatch.matchCategory,
+            existingHouseholdRef: matchedExisting?.householdId,
+            existingBeneficiaryName: topMatch.matchedCitizenName,
+            existingBenefitStatus: 'Active Application under Review',
+            warning:
+              'Potential Existing Household Registration: This citizen may be linked to a household that is already registered for this household-based scheme. Review the existing household, family details and benefit/application status before approving.',
+            matchedRecord: {
+              fullName: topMatch.matchedCitizenName,
+              citizenId: topMatch.matchedCitizenId,
+              fatherName: topMatch.matchedFatherName,
+              motherName: topMatch.matchedMotherName,
+              fullAddress: topMatch.matchedAddress,
+              householdId: topMatch.matchedHouseholdId
+            },
+            status: 'unresolved',
+            actions: [
+              'Review Match',
+              'Confirm Same Household',
+              'Mark Different Household',
+              'Request Additional Verification'
+            ]
+          },
+          suggestedActions: [
+            { label: 'Review Match', action: 'REVIEW_MATCH' },
+            { label: 'Confirm Same Household', action: 'CONFIRM_SAME_HOUSEHOLD' },
+            { label: 'Mark Different Household', action: 'MARK_DIFFERENT_HOUSEHOLD' },
+            { label: 'Request Additional Verification', action: 'REQUEST_ADDITIONAL_VERIFICATION' }
+          ]
+        });
+        return { hasAlert: true, alert, matches };
+      }
+    } else {
+      // Individual scheme
+      const allApps = await this.getAllApplications();
+      const existingSameApp = allApps.find(
+        (a) => a.citizenId === citizen.citizenId && a.schemeId === scheme?.id && a.id !== candidateApp.id && a.status !== 'Rejected'
+      );
+      if (existingSameApp) {
+        const alert = await this.createAlert({
+          applicationId: candidateApp.id,
+          citizenId: citizen.citizenId,
+          schemeId: scheme?.id || 'SCH-01',
+          alertType: 'INDIVIDUAL_DUPLICATE_CLAIM',
+          severity: 'warning',
+          title: 'Duplicate Individual Claim Submitted',
+          message: `The citizen already has an active claim (${existingSameApp.id}) for this individual scheme (${scheme?.name || candidateApp.schemeName}).`,
+          details: {
+            schemeName: scheme?.name || candidateApp.schemeName,
+            eligibilityScope: 'individual',
+            existingApplicationId: existingSameApp.id,
+            status: 'unresolved'
+          }
+        });
+        return { hasAlert: true, alert, matches: [] };
+      }
+    }
+
+    return { hasAlert: false, alert: null, matches };
+  }
+
+  async getAllBenefits() {
+    await this.ensureReady();
+    if (this.mode === 'supabase' && this.supabase) {
+      const { data, error } = await this.supabase
+        .from('benefits_ledger')
+        .select('*')
+        .order('grant_date', { ascending: false });
+      if (error) {
+        return [];
+      }
+      return (data || []).map((b) => ({
+        id: b.id,
+        citizenId: b.citizen_id,
+        householdRef: b.household_ref,
+        benefitName: b.benefit_name,
+        schemeCode: b.scheme_code,
+        benefitUnit: b.benefit_unit,
+        recipientName: b.recipient_name,
+        grantDate: b.grant_date,
+        amountOrItem: b.amount_or_item,
+        deliveringAgency: b.delivering_agency,
+        status: b.status
+      }));
+    }
+    return this.store.benefits;
   }
 
   // --------------------------------------------------------------------------

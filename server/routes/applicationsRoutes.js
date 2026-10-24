@@ -72,7 +72,13 @@ router.patch('/:id/status', requireAuth, async (req, res) => {
     res.json({ success: true, message: 'Status updated successfully.', application: updated });
   } catch (err) {
     console.error('Update application status error:', err);
-    res.status(500).json({ success: false, error: 'Failed to update application status.' });
+    if (err.message && err.message.includes('CONCURRENT_DUPLICATE_HOUSEHOLD_APPROVAL')) {
+      return res.status(409).json({
+        success: false,
+        error: err.message.replace('CONCURRENT_DUPLICATE_HOUSEHOLD_APPROVAL: ', '')
+      });
+    }
+    res.status(500).json({ success: false, error: err.message || 'Failed to update application status.' });
   }
 });
 

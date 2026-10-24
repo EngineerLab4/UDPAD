@@ -49,6 +49,14 @@ export const AuthProvider = ({ children }) => {
     return result;
   };
 
+  const updateProfile = async (profileData) => {
+    const result = await authService.updateProfile(profileData);
+    if (result.success) {
+      setUser(result.user);
+    }
+    return result;
+  };
+
   const logout = () => {
     authService.logout();
     setUser(null);
@@ -62,6 +70,7 @@ export const AuthProvider = ({ children }) => {
         loading,
         login,
         register,
+        updateProfile,
         logout,
         unreadCount,
         refreshUnread
